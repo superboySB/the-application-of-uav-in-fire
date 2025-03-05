@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import imageio
-# from llm import *
+from llm import *
 from user_prompt_generation import *
 # # from env import EnvWrapper, TOP_LEFT, TOP_RIGHT, BOTTOM_CENTER, BOTTOM_RIGHT, BOTTOM_LEFT, TOP_CENTER, region_center, \
 # #     region_dict
@@ -15,7 +15,7 @@ import re
 
 # cen_decen_framework = 'DMAS', 'HMAS-1', 'CMAS', 'HMAS-2'
 # dialogue_history_method = '_w_all_dialogue_history', '_wo_any_dialogue_history', '_w_only_state_action_history'
-dialogue_history_method ='_w_only_state_action_history'
+dialogue_history_method ='_wo_any_dialogue_history'
 cen_decen_framework = 'HMAS-2'
 # dialogue_history_method ='_wo_any_dialogue_history'
 # cen_decen_framework = 'CMAS'
@@ -24,8 +24,8 @@ class MultiDroneTaskEnv(gym.Env):
     def __init__(self, csv_path, num_drones=2, photos_per_mission=5):
         super(MultiDroneTaskEnv, self).__init__()
         self.df = pd.read_csv(csv_path)
-        self.df.sort_values(by=['year', 'month'], inplace=True) 
-        self.locations = self.df['lieu'].unique()
+        #self.df.sort_values(by=['year', 'month'], inplace=True) 
+        self.locations = self.df['location'].unique()
         self.observation_space = spaces.Box(low=0, high=1, shape=(num_drones, 2), dtype=np.float32)
         self.action_space = spaces.MultiDiscrete([len(self.locations)] * num_drones)
         
@@ -33,82 +33,72 @@ class MultiDroneTaskEnv(gym.Env):
         print(f"Action Space: {self.action_space}")
         
         self.num_drones = num_drones
-        self.photos_per_mission = photos_per_mission  # 每次任务拍摄的照片数量
+        self.photos_per_mission = photos_per_mission  # 每次任务完成数量
         self.drone_positions = np.random.rand(num_drones, 2)
         
-        # 使用CSV文件中的difficulty列
-        if 'difficulty' not in self.df.columns:
-            raise ValueError("The 'difficulty' column is missing in the CSV file.")
+        # 使用CSV文件中的ddl列
+        if 'ddl' not in self.df.columns:
+            raise ValueError("The 'ddl' column is missing in the CSV file.")
         
-        self.task_queue = self.df.groupby('lieu').apply(lambda x: x).reset_index(drop=True)
+        self.task_queue = self.df.groupby('location').apply(lambda x: x).reset_index(drop=True)
         self.initial_task_count = len(self.task_queue)  # 初始的任务总数
         
         # 定义每个无人机能处理的最高难度
-        self.drone_capabilities = ['easy', 'hard']
+        # self.drone_capabilities = ['easy', 'hard'] * (num_drones // 2) + ['easy'] * (num_drones % 2)
         
         # 从CSV文件中读取每个地点的坐标
-        self.location_coords = {row['lieu']: np.array([row['x'], row['y']]) for _, row in self.df.iterrows()}
+        self.location_coords = {row['location']: np.array([row['x'], row['y']]) for _, row in self.df.iterrows()}
         
         # 初始化无人机状态
         self.drone_states = ['idle'] * num_drones  # 状态有： 'idle', 'moving', 'tasking'
         self.drone_targets = [None] * num_drones  # 记录每个无人机的目标地点
         
-        # 初始化acc相关变量
-        self.acc_uav_total = 0
-        self.acc_task_total = self.calculate_total_acc_task()  # 预先计算所有任务的acc_task_sum
+        # 初始化当前时间
+        self.current_time = 0
         
-    def calculate_total_acc_task(self):
-        acc_task_sum = 0
-        for _, task in self.df.iterrows():
-            if task['difficulty'] == 'easy':
-                acc_task_sum += task['MeanIoUHeavy']
-            else:
-                acc_task_sum += task['MeanIoULight']
-        return acc_task_sum
+        # 添加派遣日志
+        self.dispatch_log = []
+        
+    # def calculate_total_acc_task(self):
+    #     acc_task_sum = 0
+    #     for _, task in self.df.iterrows():
+    #         # if task['difficulty'] == 'easy':
+    #         acc_task_sum += task['MeanIoUHeavy']
+    #         # else:
+    #         #     acc_task_sum += task['MeanIoULight']
+    #     return acc_task_sum
         
     def reset(self):
         self.drone_positions = np.random.rand(self.num_drones, 2)
-        self.task_queue = self.df.groupby('lieu').apply(lambda x: x).reset_index(drop=True)
+        self.task_queue = self.df.groupby('location').apply(lambda x: x).reset_index(drop=True)
         self.drone_states = ['idle'] * self.num_drones
         self.drone_targets = [None] * self.num_drones
-        self.acc_uav_total = 0
+        # self.acc_uav_total = 0
+        self.current_time = 0
         return self.drone_positions
     
     def update_task_queue(self, target_location, drone_index):
-        location_tasks = self.task_queue[self.task_queue['lieu'] == target_location]
+        location_tasks = self.task_queue[self.task_queue['location'] == target_location]
         completed_tasks = 0
-        acc_uav_sum = 0
         
         for _, task in location_tasks.iterrows():
-            task_difficulty = task['difficulty']
-            if self.drone_capabilities[drone_index] == 'easy':
-                uav_iou = task['MeanIoUHeavy']
-            else:
-                uav_iou = task['MeanIoULight']
+            ddl = task['ddl']
             
-            if task_difficulty == 'easy':
-                task_iou = task['MeanIoUHeavy']
-            else:
-                task_iou = task['MeanIoULight']
-            
-            if self.drone_capabilities[drone_index] == task_difficulty:
-                acc_uav = task_iou
-            else:
-                acc_uav = uav_iou
-            
-            acc_uav_sum += acc_uav
+            if self.current_time >= ddl:
+                print(f"Task at {target_location} expired.")
+                continue
             
             completed_tasks += 1
             self.task_queue = self.task_queue.drop(task.name)
             
             # 打印任务完成情况
-            print(f"Drone {drone_index} completed task at {target_location} with difficulty {task_difficulty}.")
+            print(f"Drone {drone_index} completed task at {target_location}.")
             
             if completed_tasks >= self.photos_per_mission:  # 使用超参数限制任务处理数量
                 break
         
         self.drone_states[drone_index] = 'idle'  # 任务完成
-        return completed_tasks, acc_uav_sum
+        return completed_tasks
     
     def move_drone(self, drone_index):
         target_location = self.drone_targets[drone_index]
@@ -129,31 +119,50 @@ class MultiDroneTaskEnv(gym.Env):
 
     def step(self, actions):
         rewards = np.zeros(self.num_drones)
-        
+        any_idle = False  # 标记是否有无人机空闲
+
+        # 增加当前时间
+        self.current_time += 1
+
+        # 移除过期任务
+        expired_tasks = self.task_queue[self.task_queue['ddl'] <= self.current_time]
+        for _, task in expired_tasks.iterrows():
+            print(f"Task at {task['location']} expired.")
+        self.task_queue = self.task_queue[self.task_queue['ddl'] > self.current_time]
+        print(actions)
         for i in range(self.num_drones):
             if self.drone_states[i] == 'idle':
+                any_idle = True  # 如果有无人机空闲，设置标记为 True
+                print(actions[i])
                 target_location = self.locations[actions[i]]
                 self.drone_targets[i] = target_location
                 self.drone_states[i] = 'moving'
+                
+                # 记录派遣信息
+                self.dispatch_log.append({
+                    'time': self.current_time,
+                    'drone_id': i,
+                    'target_location': target_location
+                })
             
             if self.drone_states[i] == 'moving':
                 self.move_drone(i)
             
             if self.drone_states[i] == 'tasking':
-                completed_tasks, acc_uav_sum = self.update_task_queue(self.drone_targets[i], i)
+                completed_tasks = self.update_task_queue(self.drone_targets[i], i)
                 rewards[i] = completed_tasks
-                self.acc_uav_total += acc_uav_sum
-            
+                # self.acc_uav_total += acc_uav_sum
+        
         done = len(self.task_queue) == 0
-        acc = self.acc_uav_total / self.acc_task_total if self.acc_task_total > 0 else 0
-        return self.drone_positions, rewards, done, {'acc': acc}
+        # acc = self.acc_uav_total / self.acc_task_total if self.acc_task_total > 0 else 0
+        return self.drone_positions, rewards, done, {'any_idle': any_idle}
     
     def render(self, mode='human'):
         print(f"Drone Positions: {self.drone_positions}")
         print(f"Drone States: {self.drone_states}")
         print(f"Remaining Tasks: {len(self.task_queue)}")
         print(f"Initial Task Count: {self.initial_task_count}")
-        print(self.task_queue[['lieu', 'difficulty']].head())
+        print(self.task_queue[['location', 'ddl']].head())
 
     def plot(self, frame_number):
         plt.figure(figsize=(6, 6))
@@ -163,7 +172,7 @@ class MultiDroneTaskEnv(gym.Env):
         
         # 绘制任务地点
         for loc, coord in self.location_coords.items():
-            remaining_tasks = len(self.task_queue[self.task_queue['lieu'] == loc])
+            remaining_tasks = len(self.task_queue[self.task_queue['location'] == loc])
             plt.scatter(*coord, c='red', marker='x')
             plt.text(coord[0], coord[1], f'{loc} ({remaining_tasks})', fontsize=8, ha='right')
         
@@ -181,14 +190,14 @@ def location_to_text():
     # 遍历每个地点
     for loc in env.locations:
         # 获取该地点的剩余任务
-        tasks_at_location = env.task_queue[env.task_queue['lieu'] == loc]
+        tasks_at_location = env.task_queue[env.task_queue['location'] == loc]
         remaining_task_count = len(tasks_at_location)
         
-        # 获取任务难度信息
-        task_difficulties = tasks_at_location['difficulty'].tolist()
+        # 计算任务的当前剩余时间信息
+        task_remaining_times = (tasks_at_location['ddl'] - env.current_time).tolist()
         
         # 构建字符串信息
-        location_info[loc] = f"{remaining_task_count}, " + ", ".join(task_difficulties)
+        location_info[loc] = f"{remaining_task_count}, " + ", ".join(map(str, task_remaining_times))
     
     # 将信息格式化为字符串，并在首尾加上 { 和 }
     location_info_str = "; ".join([f"{loc}: {info}" for loc, info in location_info.items()])
@@ -232,10 +241,9 @@ def pos_update_func_local_agent(idx):
     pos_update_prompt_other_agent = ''
     
     # 遍历每个无人机
-    for i in range(2):  # 假设有两个无人机
+    for i in range(env.num_drones):  
         # 获取无人机的工作状态和能力
         drone_state = env.drone_states[i]
-        drone_capability = env.drone_capabilities[i]
         
         # 获取目标地点或当前位置
         if env.drone_targets[i] is not None:
@@ -259,22 +267,22 @@ def pos_update_func_local_agent(idx):
         # 构建字符串信息并加上标识
         agent_label = f"Agent{i}:"
         if i == idx:
-            pos_update_prompt_local_agent = f"{agent_label} I am {drone_state}, I can handle {drone_capability} tasks perfectly at most, I am {action}"
+            pos_update_prompt_local_agent = f"{agent_label} I am {drone_state}, I am {action}"
         else:
-            pos_update_prompt_other_agent = f"{agent_label} I am {drone_state}, I can handle {drone_capability} tasks perfectly at most, I am {action}"
+            pos_update_prompt_other_agent = f"{agent_label} I am {drone_state}, I am {action}"
     
     return pos_update_prompt_local_agent, pos_update_prompt_other_agent
 
 def plan_from_response(response):
     # 使用正则表达式提取括号中的地点
-    pattern = r'Agent\d+\s*:\s*reach\s*\(([^)]+)\)'
+    pattern = r'UAV\d+\s*:\s*reach\s*\(([^)]+)\)'
     matches = re.findall(pattern, response)
     
     # 将提取的地点转换为计划
     plans = []
     for i, match in enumerate(matches):
         location_name = match.strip()
-        print(location_name)
+        print(f"Extracted location name: {location_name}")
         
         # 如果 location_name 为 None，使用当前目标地点
         if location_name.lower() == 'none':
@@ -290,6 +298,11 @@ def plan_from_response(response):
             print(f"Location '{location_name}' not found. Using closest match: '{closest_location}'")
         
         plans.append(location_index)
+    
+    # 检查计划是否在有效范围内
+    for plan in plans:
+        if plan < 0 or plan >= len(env.locations):
+            print(f"Invalid plan index: {plan}")
     
     return plans
 
@@ -313,111 +326,117 @@ def levenshtein_distance(s1, s2):
 
     return previous_row[-1]
 
-def conversation(user_prompt_list, response_total_list, token_num_count_list, dialogue_history_list):
+def conversation(user_prompt_list, response_total_list, token_num_count_list, dialogue_history_list, any_idle):
+    # 只有在有无人机空闲时才进行新的决策
+    print(1)
+    if any_idle:
+        print(2)
+        location_info = location_to_text()
+        print(f"Location Info: {location_info}")
+        uav_update_prompt = pos_to_text()
+        print(f"Position Update: {uav_update_prompt}")  # 打印无人机位置信息
+        plans = []
+        print("A new conversation start !!!!!##############################################################")
 
-    location_info = location_to_text()
-    print(f"Location Info: {location_info}")
-    uav_update_prompt = pos_to_text()
-    print(f"Position Update: {uav_update_prompt}")  # 打印无人机位置信息
-    plans = []
-    print("A new conversation start !!!!!##############################################################")
+        if cen_decen_framework in ('CMAS', 'HMAS-2'):
+            user_prompt_1 = input_prompt_1_func_total(dialogue_history_method, cen_decen_framework, location_info,
+                                                      uav_update_prompt, response_total_list, env.num_drones)
+            user_prompt_list.append(user_prompt_1)
+            # if cen_decen_framework == 'CMAS':
+            #     messages = message_construct_func(user_prompt_list, response_total_list, dialogue_history_method)
+            # else:
+            #     messages = message_construct_func([user_prompt_1], [],dialogue_history_method)
+            
+            messages = message_construct_func([user_prompt_1], [], '_w_all_dialogue_history')
+            print(messages)
+            # 接收回复 待后续修改
+            response, token_num_count = GPT_response(messages,'gpt-4')  # 'gpt-4' or 'gpt-3.5-turbo-0301' or 'gpt-4-32k' or 'gpt-3' or 'gpt-4-0613'
+            #response = ''' UAV0 : reach (a), UAV1 : reach (b) '''
+            print('Initial response: ', response)
+            plans = plan_from_response(response)
+            ###check_valid
+            #token_num_count_list.append(token_num_count)
 
 
-    if cen_decen_framework in ('CMAS', 'HMAS-2'):
-        user_prompt_1 = input_prompt_1_func_total(dialogue_history_method, cen_decen_framework, location_info,
-                                                  uav_update_prompt, response_total_list)
-        user_prompt_list.append(user_prompt_1)
-        # if cen_decen_framework == 'CMAS':
-        #     messages = message_construct_func(user_prompt_list, response_total_list, dialogue_history_method)
-        # else:
-        #     messages = message_construct_func([user_prompt_1], [],dialogue_history_method)
-        
-        messages = message_construct_func([user_prompt_1], [], '_w_all_dialogue_history')
-        print(messages)
-        # 接收回复 待后续修改
-        #response, token_num_count = GPT_response(messages,'gpt-4')  # 'gpt-4' or 'gpt-3.5-turbo-0301' or 'gpt-4-32k' or 'gpt-3' or 'gpt-4-0613'
-        response = ''' Agent0 : reach (Pioggiola), Agent1 : reach (Pioggiola) '''
-        print('Initial response: ', response)
-        plans = plan_from_response(response)
-        ###check_valid
-        #token_num_count_list.append(token_num_count)
+            if cen_decen_framework == 'HMAS-2':
+                print('--------HMAS-2 method starts--------')
+                dialogue_history = f'Central Planner: {response}\n'
+                prompt_list_dir = {}
+                response_list_dir = {}
+                local_agent_response_list_dir = {}
+
+                local_agent_response_list_dir['feedback1'] = ''
+
+                for idx in range(env.num_drones):
+                    prompt_list_dir[f'Agent {idx}'] = []
+                    response_list_dir[f'Agent {idx}'] = []
+                    pos_update_prompt_local_agent, pos_update_prompt_other_agent = pos_update_func_local_agent(idx)
+                    local_reprompt = input_prompt_local_agent_HMAS2_dialogue_func(
+                        location_info, pos_update_prompt_local_agent, pos_update_prompt_other_agent, response,
+                        response_total_list, dialogue_history_list, dialogue_history_method)
+                    prompt_list_dir[f'Agent {idx}'].append(local_reprompt)
+                    messages = message_construct_func( prompt_list_dir[f'Agent {idx}'], response_list_dir[f'Agent {idx}'], '_w_all_dialogue_history')
+                    print(messages)
+                    response_local_agent, token_num_count = GPT_response(messages, 'gpt-4')
+                    token_num_count_list.append(token_num_count)
+                    if response_local_agent != 'I Agree':
+                        local_agent_response_list_dir['feedback1'] += f'Agent {idx}: {response_local_agent}\n'  # collect the response from all the local agents
+                        dialogue_history += f'Agent {idx}: {response_local_agent}\n'
+                ###对机器人的反馈进行检查
+                if local_agent_response_list_dir['feedback1'] != '':
+                    #这里提示需要修改一下 改一下格式就行
+                    local_agent_response_list_dir[
+                        'feedback1'] += '\nThis is the feedback from local agents. If you find some errors in your previous plan, try to modify it. Otherwise, output the same plan as before. The output should have the same json format {{{{Agent0 : reach (xxx), Agent1 : reach (xxx)}}}}, if Agent1 or Agent0 is not idle {{{{Agent0 : reach (xxx), Agent1 : reach (None)}}}} indicates that Agent1 is not idle and does not need to be assigned, as above. Do not explain, just directly output Your response:'
+                    messages = message_construct_func(
+                        [user_prompt_list[-1], local_agent_response_list_dir['feedback1']], [response],
+                        '_w_all_dialogue_history')  # message construction 第一个列表长度为2，没有问题
+                    response_central_again, token_num_count = GPT_response(messages, 'gpt-4')
+                    token_num_count_list.append(token_num_count)
+                    plans = plan_from_response(response_central_again)
+                    print(f'Modified plan response:\n {response_central_again}')
+                else:
+                    print(f'Plan:\n {response}')
+                dialogue_history_list.append(dialogue_history)
+        else:
+             print("DMAS START!--------------------------  先不用管这个")
+            # match = None
+            # count_round = 0
+            # dialogue_history = ''
+            # response = '{}'
+            # while not match and count_round <= 3:
+            #     count_round += 1
+            #     for idx in range(3):
+            #         pos_update_prompt_local_agent, pos_update_prompt_other_agent = pos_update_func_local_agent(idx)
+
+            #         user_prompt_1 = input_prompt_local_agent_DMAS_dialogue_func(location_info,pos_update_prompt_local_agent,
+            #                                                                     pos_update_prompt_other_agent,
+            #                                                                     dialogue_history,
+            #                                                                     response_total_list,
+            #                                                                     dialogue_history_list,
+            #                                                                     dialogue_history_method)
+            #         user_prompt_list.append(user_prompt_1)
+            #         print(f'User prompt: {user_prompt_1}\n')
+            #         messages = message_construct_func([user_prompt_1], [], '_w_all_dialogue_history')
+            #         response, token_num_count = GPT_response(messages,model_name)  # 'gpt-4' or 'gpt-3.5-turbo-0301' or 'gpt-4-32k' or 'gpt-3' or 'gpt-4-0613'
+            #         token_num_count_list.append(token_num_count)
+            #         dialogue_history += f'[Agent[{idx}]: {response}]\n\n'
+            #         print(f'response: {response}')
+            #         plans = plan_from_response(response)
+            # dialogue_history_list.append(dialogue_history)
+    #添加最终的决策
+        response_total_list.append(response)
 
 
-        if cen_decen_framework == 'HMAS-2':
-            print('--------HMAS-2 method starts--------')
-            dialogue_history = f'Central Planner: {response}\n'
-            prompt_list_dir = {}
-            response_list_dir = {}
-            local_agent_response_list_dir = {}
-            local_agent_response_list_dir['feedback1'] = ''
-
-            for idx in range(2):
-                prompt_list_dir[f'Agent[{idx}'] = []
-                response_list_dir[f'Agent[{idx}'] = []
-                pos_update_prompt_local_agent, pos_update_prompt_other_agent = pos_update_func_local_agent(idx)
-                local_reprompt = input_prompt_local_agent_HMAS2_dialogue_func(
-                    pos_update_prompt_local_agent, pos_update_prompt_other_agent, response,
-                    response_total_list, dialogue_history_list, dialogue_history_method)
-                prompt_list_dir[f'Agent[{idx}'].append(local_reprompt)
-                messages = message_construct_func( prompt_list_dir[f'Agent[{idx}'], response_list_dir[f'Agent[{idx}'], '_w_all_dialogue_history')
-                print(messages)
-                response_local_agent, token_num_count = GPT_response(messages, 'gpt-4')
-                token_num_count_list.append(token_num_count)
-                if response_local_agent != 'I Agree':
-                    local_agent_response_list_dir['feedback1'] += f'Agent[{idx}]: {response_local_agent}\n'  # collect the response from all the local agents
-                    dialogue_history += f'Agent[{idx}]: {response_local_agent}\n'
-            ###对机器人的反馈进行检查
-            if local_agent_response_list_dir['feedback1'] != '':
-                #这里提示需要修改一下 改一下格式就行
-                local_agent_response_list_dir[
-                    'feedback1'] += '\nThis is the feedback from local agents. If you find some errors in your previous plan, try to modify it. Otherwise, output the same plan as before. The output should have the same json format {{{{Agent0 : reach (xxx), Agent1 : reach (xxx)}}}}, if Agent1 or Agent0 is not idle {{{{Agent0 : reach (xxx), Agent1 : reach (None)}}}} indicates that Agent1 is not idle and does not need to be assigned, as above. Do not explain, just directly output Your response:'
-                messages = message_construct_func(
-                    [user_prompt_list[-1], local_agent_response_list_dir['feedback1']], [response],
-                    '_w_all_dialogue_history')  # message construction 第一个列表长度为2，没有问题
-                response_central_again, token_num_count = GPT_response(messages, 'gpt-4')
-                token_num_count_list.append(token_num_count)
-                print(f'Modified plan response:\n {response}')
-            else:
-                print(f'Plan:\n {response}')
-                pass
-            dialogue_history_list.append(dialogue_history)
+        return plans
     else:
-        print("DMAS START!--------------------------  先不用管这个")
-        match = None
-        count_round = 0
-        dialogue_history = ''
-        response = '{}'
-        while not match and count_round <= 3:
-            count_round += 1
-            for idx in range(3):
-                pos_update_prompt_local_agent, pos_update_prompt_other_agent = pos_update_func_local_agent(idx)
-
-                user_prompt_1 = input_prompt_local_agent_DMAS_dialogue_func(location_info,pos_update_prompt_local_agent,
-                                                                            pos_update_prompt_other_agent,
-                                                                            dialogue_history,
-                                                                            response_total_list,
-                                                                            dialogue_history_list,
-                                                                            dialogue_history_method)
-                user_prompt_list.append(user_prompt_1)
-                print(f'User prompt: {user_prompt_1}\n')
-                messages = message_construct_func([user_prompt_1], [], '_w_all_dialogue_history')
-                response, token_num_count = GPT_response(messages,model_name)  # 'gpt-4' or 'gpt-3.5-turbo-0301' or 'gpt-4-32k' or 'gpt-3' or 'gpt-4-0613'
-                token_num_count_list.append(token_num_count)
-                dialogue_history += f'[Agent[{idx}]: {response}]\n\n'
-                print(f'response: {response}')
-                plans = plan_from_response(response)
-        dialogue_history_list.append(dialogue_history)
-#添加最终的决策
-    response_total_list.append(response)
-
-
-    return plans
+        print("No idle drones available for new decisions.")
 
 
 
 # 使用环境并生成GIF
-csv_path = './fire_data.csv'
-env = MultiDroneTaskEnv(csv_path, photos_per_mission=5)  # 设置每次任务拍摄的照片数量
+print(0)
+csv_path = './democsv.csv'
+env = MultiDroneTaskEnv(csv_path, photos_per_mission=5)  # 设置每次能完成的任务数量
 state = env.reset()
 done = False
 frames = []
@@ -427,11 +446,13 @@ response_total_list = []  # The record list of all the responses
 token_num_count_list = []  # The record list of the length of token
 plans = []
 frame_number = 0
-max_steps = 2  # 设置最大轮数
-
+max_steps = 1  # 设置最大轮数
+any_idle = True
 while not done and frame_number < max_steps:
 #while not done:
-    plans = conversation(user_prompt_list, response_total_list, token_num_count_list, dialogue_history_list)
+    print(0)
+    plans = conversation(user_prompt_list, response_total_list, token_num_count_list, dialogue_history_list, any_idle)
+    print(plans)
     actions = plans  # 将 plans 直接赋值给 actions
     state, rewards, done, info = env.step(actions)
     env.render()
@@ -454,12 +475,20 @@ for filename in frames:
     os.remove(filename)
 
 # 输出最终的acc
-final_acc = info['acc']
-print(f"Final acc: {final_acc}")
+# final_acc = info['acc']
+# print(f"Final acc: {final_acc}")
+
+# 在模拟结束后打印派遣日志
+print("Dispatch Log:")
+for log in env.dispatch_log:
+    print(f"Time: {log['time']}, Drone ID: {log['drone_id']}, Target Location: {log['target_location']}")
+
+# 将派遣日志转换为 DataFrame
+dispatch_df = pd.DataFrame(env.dispatch_log)
+
+# 将 DataFrame 写入 CSV 文件
+dispatch_df.to_csv('dispatch_log.csv', index=False)
+
+print("Dispatch log has been written to dispatch_log.csv")
 
 
-# 运行代码 ok
-# 差值越大任务越难，差值越小任务越简单  对任务添加属性 ok
-# 任务的属性（难度， 地点） ok
-# 拍摄数量作为超参设置 ok
-# metric固定轮次计算满足率 ，即iou（是否满足清晰度，不满足 (西格玛（iou_right-iou）/iou_right),满足则为1）的差值， 

@@ -4,7 +4,7 @@ import time
 import hashlib
 
 # 设置 API 密钥和 API 基础 URL
-openai.api_key = "sk-ZyDHIVttk1Bkc3Tg75D3129371584a369400868297B82dCa"
+openai.api_key = "sk-tVIu0cYO13rAFxiB4aF1C0Be68464c0fB4E75f25EfA357Fb"
 openai.api_base = "https://api.lqqq.ltd/v1"
 
 enc = tiktoken.get_encoding("cl100k_base")
@@ -21,7 +21,6 @@ def hash_messages(messages):
 
 def GPT_response(messages, model_name):
     token_num_count = 0
-    print(messages)
 
     # 计算消息的哈希值
     cache_key = hash_messages(messages)
@@ -59,7 +58,6 @@ def GPT_response(messages, model_name):
                     presence_penalty=0
                 )
             except:
-                print(result)
                 print(token_num_count)
                 return 'Out of tokens', token_num_count
         token_num_count += len(enc.encode(result.choices[0]['message']['content']))
