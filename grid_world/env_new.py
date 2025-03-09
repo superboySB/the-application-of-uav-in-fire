@@ -446,7 +446,7 @@ response_total_list = []  # The record list of all the responses
 token_num_count_list = []  # The record list of the length of token
 plans = []
 frame_number = 0
-max_steps = 1  # 设置最大轮数
+max_steps = 5  # 设置最大轮数
 any_idle = True
 while not done and frame_number < max_steps:
 #while not done:
